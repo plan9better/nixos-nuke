@@ -44,6 +44,13 @@
               ];
               boot.initrd.kernelModules = [ "nvme" ];
 
+              # Reboot through the firmware ACPI reset path, not the kernel's
+              # default fallback chain (keyboard-controller / triple-fault), which
+              # some server BMCs latch on: the box shows powered off and won't
+              # power back on without an AC cycle. Try reboot=efi/pci/bios if acpi
+              # still hangs this hardware.
+              boot.kernelParams = [ "reboot=acpi" ];
+
               # The initrd.systemd.* options require the systemd-based initrd.
               boot.initrd.systemd.enable = true;
               boot.initrd.systemd.initrdBin = with pkgs; [
@@ -97,7 +104,6 @@
                     done
                   }
 
-                  # Every whole disk: NVMe SSDs and SAS/SATA HDDs (the Ceph OSDs).
                   for sys in /sys/block/nvme* /sys/block/sd*; do
                     [ -e "$sys" ] || continue
                     DISK="/dev/$(basename "$sys")"
@@ -106,11 +112,19 @@
                     wipefs -a "$DISK"        || true  # fs/partition signatures
                     sgdisk --zap-all "$DISK" || true  # GPT primary + backup
                     blkdiscard -f "$DISK"    || true  # TRIM (SSD/NVMe; no-op HDD)
-                    # nvme format "$DISK" --ses=1 --force  # crypto erase, if wanted
                   done
 
                   sync
-                  echo b > /proc/sysrq-trigger # hard reboot -> no ESP -> PXE
+                  sleep 2
+                  # Clean reboot: systemctl runs device_shutdown() to quiesce the
+                  # NVMe/SAS controllers we just hammered, then resets via firmware
+                  # (reboot=acpi). SysRq-b (emergency_restart) skips device_shutdown
+                  # and can leave the freshly-reset controllers/BMC wedged -> "won't
+                  # power on" -> AC cycle. Fall back to SysRq only if systemd fails
+                  # to reboot. No ESP is left, so firmware drops to PXE either way.
+                  systemctl reboot
+                  sleep 20
+                  echo b > /proc/sysrq-trigger
                 '';
               };
             }
